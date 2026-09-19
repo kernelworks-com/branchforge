@@ -1,99 +1,81 @@
 # Branchforge
 
-Branchforge is a small C++20 reference runtime for exploring independent
-inference continuations. The first implementation provides a synchronous CPU
-toy backend whose purpose is to make state lifetime and branching semantics
-testable. It is not a real model backend and does not claim GPU support.
+**Fork model state. Explore independent continuations. Keep the result you need.**
 
-## Build and run
+Branchforge is a C++ library for experimenting with inference branches: start two
+continuations from the same snapshot, feed them different tokens, and retain or
+discard each branch without changing the original state.
 
-Branchforge has no third-party runtime dependency. With CMake and a C++20
-compiler available:
+It is for inference engineers exploring search, branching, and state ownership.
+**The current implementation is an experimental CPU toy backend.** You can test
+branch behavior today; running a real language model requires a future backend.
+
+## Try it
+
+You need a C++20 compiler and CMake 3.20+. No GPU or model download is needed.
+See [build help](docs/BUILDING.md) if `cmake` is missing or compilation fails.
 
 ```sh
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build
-ctest --test-dir build --output-on-failure
+git clone https://github.com/kernelworks-com/branchforge.git
+cd branchforge
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
 ./build/branchforge_demo
 ```
 
-The demo creates two continuations from one root snapshot, advances them with
-different supplied token sequences, retains one branch, forks from the
-retained snapshot, and discards completed branches.
+Already in the repository? Start at the `cmake` command. The demo prints:
 
-## Synchronous API
-
-The public header is [`include/branchforge/branchforge.hpp`](include/branchforge/branchforge.hpp).
-The core operations are:
-
-```cpp
-branchforge::Runtime runtime;
-auto root = runtime.root_snapshot();
-auto branch = runtime.fork(root.value());
-
-std::array<branchforge::TokenId, 2> tokens{4, 8};
-auto result = runtime.advance(branch.value(), tokens);
-auto kept = runtime.discard_or_keep(
-    branch.value(), branchforge::BranchDecision::Keep);
+```text
+left position=3 tokens=[4,8,15] recurrent[0]=745016773
+right position=2 tokens=[16,23] recurrent[0]=362206358
+root position=0 tokens=[] recurrent[0]=0
+kept position=3 tokens=[4,8,15] recurrent[0]=745016773
+continuation position=4 tokens=[4,8,15,24] recurrent[0]=440169141
 ```
 
-`advance` consumes exactly the supplied token IDs. The sequence is not a token
-budget, and generation or sampling is not part of this milestone. An empty
-sequence is valid and returns logits for the current boundary without changing
-state.
+The two branches have different histories while the root stays unchanged. Keeping
+`left` creates a reusable snapshot; advancing a new branch from it leaves that
+snapshot unchanged too. The recurrent values are deterministic toy-model state.
 
-Snapshots are immutable and copyable. `fork` eagerly copies the toy model's
-append-only attention history, recurrent state, position, and sampling state.
-The copy is deliberate correctness baseline behavior; this release does not
-promise constant-time or zero-copy branching.
+## Work with branches
 
-`KEEP` publishes a completed immutable snapshot and consumes the mutable branch.
-`DISCARD` invalidates the branch and publishes no snapshot. A branch cannot be
-merged back into its parent. Handles carry a checked slot generation, so a
-stale branch remains rejected even when its slot is later reused. Operations
-that fail validation leave the branch at its prior completed boundary.
+| Operation | What you get |
+|---|---|
+| `fork(snapshot)` | An independent mutable branch copied from a snapshot. |
+| `advance(branch, token_ids)` | Updated state and toy logits after consuming those exact token IDs. |
+| `discard_or_keep(branch, Keep)` | An immutable snapshot you can fork again. |
+| `discard_or_keep(branch, Discard)` | A retired branch with no retained snapshot. |
 
-The reference toy model accepts token IDs from `0` through
-`vocabulary_size - 1`. Its `StateView` is available for deterministic tests and
-examples; it is not a representation of a production model's internal state.
+`advance` takes token IDs, not a number of tokens to generate. Check each returned
+`Result` before using its value. The [complete C++ example](examples/branch_explorer.cpp)
+shows error handling, branching, inspection, and cleanup. See the
+[API reference](docs/REFERENCE.md) for ownership and failure behavior.
 
-## Scope and limitations
+## What works today
 
-This milestone is intentionally synchronous. A branch mutation uses a
-try-locked branch guard and reports `Busy` if another mutation is in progress,
-but there are no asynchronous operation handles, cancellation, device leases,
-memory backpressure, or deferred device reclamation yet. The eager state copy
-also means the implementation does not measure or provide shared attention
-pages, recurrent copy-on-write, checkpoint/replay, or a real model adapter.
+- Independent copies of token history, recurrent state, position, and RNG state.
+- Immutable snapshots, checked branch handles, and stale-handle rejection.
+- Atomic advance and KEEP failures: rejected work preserves the prior branch state.
+- A `Busy` result when another mutation holds the branch, plus automatic cleanup.
 
-Model and adapter compatibility is represented by each runtime's context
-ownership; snapshots cannot be used with another runtime. Sampling stream
-splitting and a separate sampler API remain future work. External application
-side effects are outside the runtime's state boundary. The public `TestHooks`
-type exists for deterministic semantic tests of Busy and failure atomicity; it
-is not a scheduler or fault model for production backends.
+Branches use eager copies. Shared memory pages, copy-on-write, a sampler, async
+operations, and GPU/real-model backends are future work. Branches do not merge, and
+application side effects are outside the snapshot. No performance advantage is
+claimed for the toy backend.
 
-## Related work
+## Tests and feedback
 
-Prefix caching and recurrent-state management already exist in serving systems.
-[SGLang's unified cache](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/unified_cache/components/README.md)
-includes multiple attention/state types and copy-on-write behavior.
+```sh
+ctest --test-dir build --output-on-failure --no-tests=error
+```
 
-Branchforge's research question is whether explicit branch operations can provide
-useful semantics and measurable efficiency for a supported workload. The API
-names alone are not a claim of novelty.
+Tests cover branch independence, state/logit equivalence, stale handles, ownership
+transfer, allocation failures, and concurrent mutation. Build automation is
+described in [CI details](.github/README.md).
 
-## Kernelworks
+[Open an issue](https://github.com/kernelworks-com/branchforge/issues) with a small
+example and the expected versus actual branch behavior. Include tool versions for
+build problems. Synthetic examples are preferred over customer data.
 
-Branchforge is an independent Kernelworks project. It does not require
-Stateguard or Yieldpoint.
-
-## Continuous checks and source delivery
-
-See [.github/README.md](.github/README.md) for the compiler matrix, sanitizer
-checks, and tested source archives delivered after successful checks on `main`.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE). Model weights and third-party
-backends retain their own license terms.
+Branchforge is an independent [Kernelworks](https://github.com/kernelworks-com)
+project; no sibling project is required. Licensed under [Apache-2.0](LICENSE).
