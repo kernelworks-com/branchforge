@@ -1,67 +1,77 @@
 # Branchforge
 
-**Explicit branching for inference state, from Kernelworks.**
+Branchforge is a small C++20 reference runtime for exploring independent
+inference continuations. The first implementation provides a synchronous CPU
+toy backend whose purpose is to make state lifetime and branching semantics
+testable. It is not a real model backend and does not claim GPU support.
 
-Branchforge is a planned native runtime component for exploring independent model
-continuations while making state sharing, mutation, and disposal explicit.
+## Build and run
 
-## Project status
+Branchforge has no third-party runtime dependency. With CMake and a C++20
+compiler available:
 
-**Pre-implementation.** This repository contains project documentation. There is
-no installable engine, stable API, supported model list, or performance benchmark
-yet. The following interface is conceptual pseudocode.
-
-## The interface
-
-```text
-branch = fork(state)
-advance(branch, tokens)
-discard_or_keep(branch)
+```sh
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+./build/branchforge_demo
 ```
 
-The intended meaning is simple:
+The demo creates two continuations from one root snapshot, advances them with
+different supplied token sequences, retains one branch, forks from the
+retained snapshot, and discards completed branches.
 
-- **fork:** create an independent continuation from a consistent state.
-- **advance:** consume a supplied token sequence and update that branch.
-- **discard or keep:** release a continuation or retain a stable state for further work.
+## Synchronous API
 
-Token generation would be a separate operation with an explicit sampling policy.
-Keeping a branch does not merge it with another branch, and discarding one does
-not mean its physical memory can always be reused immediately.
+The public header is [`include/branchforge/branchforge.hpp`](include/branchforge/branchforge.hpp).
+The core operations are:
 
-## The problem
+```cpp
+branchforge::Runtime runtime;
+auto root = runtime.root_snapshot();
+auto branch = runtime.fork(root.value());
 
-Applications that explore several continuations need more than a copy of the text.
-They need independent model state, correct positions and sampling state, and
-ownership rules for any outstanding computation.
+std::array<branchforge::TokenId, 2> tokens{4, 8};
+auto result = runtime.advance(branch.value(), tokens);
+auto kept = runtime.discard_or_keep(
+    branch.value(), branchforge::BranchDecision::Keep);
+```
 
-Attention state can often share immutable prefixes. Recurrent state may require
-copying or reconstruction when a branch advances. Branchforge aims to expose
-consistent semantics while allowing different model components to use different
-storage strategies.
+`advance` consumes exactly the supplied token IDs. The sequence is not a token
+budget, and generation or sampling is not part of this milestone. An empty
+sequence is valid and returns logits for the current boundary without changing
+state.
 
-## Intended capabilities
+Snapshots are immutable and copyable. `fork` eagerly copies the toy model's
+append-only attention history, recurrent state, position, and sampling state.
+The copy is deliberate correctness baseline behavior; this release does not
+promise constant-time or zero-copy branching.
 
-- Immutable retained states and explicit mutable branch handles.
-- Shared attention prefixes with isolation on mutation.
-- Model-specific recurrent-state copying or checkpoint/replay.
-- Explicit sampling-stream behavior.
-- Predictable errors for stale handles, incompatible state, and unsupported operations.
-- Deferred physical reclamation when work is still in flight.
+`KEEP` publishes a completed immutable snapshot and consumes the mutable branch.
+`DISCARD` invalidates the branch and publishes no snapshot. A branch cannot be
+merged back into its parent. Handles carry a checked slot generation, so a
+stale branch remains rejected even when its slot is later reused. Operations
+that fail validation leave the branch at its prior completed boundary.
 
-The first target is a portable reference backend followed by one documented model
-family and native backend. The project does not promise universal model support
-or constant-time, zero-copy branching.
+The reference toy model accepts token IDs from `0` through
+`vocabulary_size - 1`. Its `StateView` is available for deterministic tests and
+examples; it is not a representation of a production model's internal state.
 
-## Intended use
+## Scope and limitations
 
-Examples include best-of-several continuation experiments, search over candidate
-token sequences, and interactive systems that abandon one continuation and retain
-another. Branchforge manages model state; application decisions and external tool
-side effects remain the application's responsibility.
+This milestone is intentionally synchronous. A branch mutation uses a
+try-locked branch guard and reports `Busy` if another mutation is in progress,
+but there are no asynchronous operation handles, cancellation, device leases,
+memory backpressure, or deferred device reclamation yet. The eager state copy
+also means the implementation does not measure or provide shared attention
+pages, recurrent copy-on-write, checkpoint/replay, or a real model adapter.
 
-Build instructions and runnable examples will be added when implementation exists.
-The intended runtime is self-hosted and does not require a Kernelworks service.
+Model and adapter compatibility is represented by each runtime's context
+ownership; snapshots cannot be used with another runtime. Sampling stream
+splitting and a separate sampler API remain future work. External application
+side effects are outside the runtime's state boundary. The public `TestHooks`
+type exists for deterministic semantic tests of Busy and failure atomicity; it
+is not a scheduler or fault model for production backends.
 
 ## Related work
 
@@ -70,15 +80,20 @@ Prefix caching and recurrent-state management already exist in serving systems.
 includes multiple attention/state types and copy-on-write behavior.
 
 Branchforge's research question is whether explicit branch operations can provide
-useful semantics and measurable efficiency for a supported workload. The API names
-alone are not a claim of novelty.
+useful semantics and measurable efficiency for a supported workload. The API
+names alone are not a claim of novelty.
 
 ## Kernelworks
 
-Branchforge is an independent Kernelworks project. It does not require Stateguard
-or Yieldpoint.
+Branchforge is an independent Kernelworks project. It does not require
+Stateguard or Yieldpoint.
+
+## Continuous checks and source delivery
+
+See [.github/README.md](.github/README.md) for the compiler matrix, sanitizer
+checks, and tested source archives delivered after successful checks on `main`.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE). Model weights and third-party backends
-retain their own license terms.
+Apache License 2.0. See [LICENSE](LICENSE). Model weights and third-party
+backends retain their own license terms.
